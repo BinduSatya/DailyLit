@@ -112,3 +112,18 @@ Rules:
 - Stay within the problem context.
 """,
     )
+
+
+def answer_general_question(user_text: str) -> str:
+    return _ai_text(
+        input_text=user_text,
+        instructions="""
+Answer the user's regular question conversationally.
+
+Rules:
+- You are allowed to answer general, non-LeetCode questions.
+- Keep the answer concise and useful.
+- If they ask for LeetCode help, remind them they can use /potd or /hint.
+- Do not pretend their question is about the current POTD unless they clearly say so.
+""",
+    )

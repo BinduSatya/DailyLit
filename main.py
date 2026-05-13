@@ -13,6 +13,8 @@ from datetime import time
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+from telegram import BotCommand
+from telegram.error import TelegramError
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from db import init_db
@@ -57,6 +59,19 @@ def build_app() -> Application:
 
 
 async def post_init(app: Application) -> None:
+    try:
+        await app.bot.set_my_commands(
+            [
+                BotCommand("start", "Show bot help"),
+                BotCommand("subscribe", "Receive daily POTD at 10:00 AM IST"),
+                BotCommand("unsubscribe", "Stop daily POTD messages"),
+                BotCommand("potd", "Show today's LeetCode problem"),
+                BotCommand("hint", "Get the next progressive hint"),
+            ]
+        )
+    except TelegramError as exc:
+        logger.warning("Could not register Telegram command menu: %s", exc)
+
     if app.job_queue is None:
         logger.warning("Job queue is unavailable. Install python-telegram-bot[job-queue] for daily notifications.")
     else:

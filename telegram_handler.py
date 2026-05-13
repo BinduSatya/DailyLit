@@ -5,12 +5,13 @@ import re
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.error import Forbidden, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
 from ai_helpers import (
     MAX_HINTS,
+    answer_general_question,
     answer_user_question,
     explain_problem_text,
     hint_text,
@@ -30,6 +31,29 @@ from message_formatter import build_problem_message, problem_keyboard
 
 
 FETCH_ERROR = "I could not fetch today's LeetCode problem right now. Please try again shortly."
+BUSY_CALLBACK = "busy"
+
+
+def _user_busy(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    return bool(context.user_data.get("busy"))
+
+
+def _set_user_busy(context: ContextTypes.DEFAULT_TYPE, value: bool) -> None:
+    context.user_data["busy"] = value
+
+
+async def _show_button_loading(update: Update, text: str = "Working on it...") -> None:
+    query = update.callback_query
+    if not query or not query.message:
+        return
+
+    await query.answer(text)
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(text, callback_data=BUSY_CALLBACK)]])
+        )
+    except TelegramError as exc:
+        logger.debug("Could not update inline keyboard loading state: %s", exc)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -188,42 +212,56 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     if not query:
         return
-    await query.answer()
+
+    if query.data == BUSY_CALLBACK:
+        await query.answer("Still working on your previous request.", show_alert=False)
+        return
+
+    if _user_busy(context):
+        await query.answer("Please wait for the current request to finish.", show_alert=False)
+        return
+
+    _set_user_busy(context, True)
+    await _show_button_loading(update)
 
     user = query.from_user
     if not user or not query.message:
+        _set_user_busy(context, False)
         return
-
-    await asyncio.to_thread(upsert_user, user.id, user.username, user.first_name)
 
     try:
+        await asyncio.to_thread(upsert_user, user.id, user.username, user.first_name)
+
         potd = await get_potd()
+        await asyncio.to_thread(reset_hint_state_for_new_slug, user.id, potd["slug"])
+
+        if query.data == "explain_problem":
+            text = await asyncio.to_thread(
+                explain_problem_text,
+                potd["content"],
+                potd["title"],
+                potd["difficulty"],
+                potd["topics"],
+            )
+            await query.message.reply_text(text)
+            return
+
+        if query.data == "next_hint":
+            await send_next_hint(query, context, potd)
+            return
+
+        if query.data == "review_approach":
+            await query.message.reply_text(
+                "Paste your code or approach in the chat, and I will review it without giving the final answer."
+            )
+            return
+
+        await query.message.reply_text("I did not recognize that action.")
     except Exception as exc:
-        logger.exception("Failed to fetch POTD for button action: %s", exc)
-        await query.message.reply_text(FETCH_ERROR)
-        return
-
-    await asyncio.to_thread(reset_hint_state_for_new_slug, user.id, potd["slug"])
-
-    if query.data == "explain_problem":
-        text = await asyncio.to_thread(
-            explain_problem_text,
-            potd["content"],
-            potd["title"],
-            potd["difficulty"],
-            potd["topics"],
-        )
-        await query.message.reply_text(text)
-        return
-
-    if query.data == "next_hint":
-        await send_next_hint(query, context, potd)
-        return
-
-    if query.data == "review_approach":
-        await query.message.reply_text(
-            "Paste your code or approach in the chat, and I will review it without giving the final answer."
-        )
+        logger.exception("Failed to handle button action: %s", exc)
+        await query.message.reply_text(FETCH_ERROR if query.data in {"explain_problem", "next_hint"} else "I hit an error.")
+    finally:
+        _set_user_busy(context, False)
 
 
 async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -236,53 +274,84 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not text:
         return
 
-    await asyncio.to_thread(upsert_user, user.id, user.username, user.first_name)
-
-    try:
-        potd = await get_potd()
-    except Exception as exc:
-        logger.exception("Failed to fetch POTD for text answer: %s", exc)
-        await message.reply_text(FETCH_ERROR)
+    if _user_busy(context):
+        await message.reply_text("Please wait for the current request to finish.")
         return
 
-    await asyncio.to_thread(reset_hint_state_for_new_slug, user.id, potd["slug"])
-
-    text_lower = text.lower()
-    looks_like_code = (
-        "```" in text
-        or "class " in text
-        or "def " in text
-        or "public " in text
-        or "import " in text
-        or "#include" in text
-        or re.search(r"\bfor\s*\(.*;.*;.*\)", text) is not None
-        or re.search(r"\bwhile\s*\(", text) is not None
-    )
-
-    asks_for_approach_review = any(
-        phrase in text_lower
-        for phrase in ["my approach", "approach", "can this work", "is this correct", "check my code", "debug", "bug"]
-    )
-
-    asks_for_concept_help = any(
-        phrase in text_lower
-        for phrase in ["why", "how", "what does", "explain", "concept", "intuition", "edge case", "complexity"]
-    )
+    _set_user_busy(context, True)
 
     try:
+        await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+        await asyncio.to_thread(upsert_user, user.id, user.username, user.first_name)
+
+        text_lower = text.lower()
+        looks_like_code = (
+            "```" in text
+            or "class " in text
+            or "def " in text
+            or "public " in text
+            or "import " in text
+            or "#include" in text
+            or re.search(r"\bfor\s*\(.*;.*;.*\)", text) is not None
+            or re.search(r"\bwhile\s*\(", text) is not None
+        )
+
+        asks_for_approach_review = any(
+            phrase in text_lower
+            for phrase in ["my approach", "approach", "can this work", "is this correct", "check my code", "debug", "bug"]
+        )
+
+        asks_for_problem_help = any(
+            phrase in text_lower
+            for phrase in [
+                "potd",
+                "leetcode",
+                "problem",
+                "hint",
+                "test case",
+                "edge case",
+                "complexity",
+                "constraint",
+                "input",
+                "output",
+                "approach",
+            ]
+        )
+
+        asks_for_next_hint = any(
+            phrase in text_lower
+            for phrase in ["hint", "next hint", "give me clue", "clue", "stuck"]
+        )
+
+        if not (looks_like_code or asks_for_approach_review or asks_for_problem_help):
+            reply = await asyncio.to_thread(answer_general_question, text)
+            await message.reply_text(reply)
+            return
+
+        try:
+            potd = await get_potd()
+        except Exception as exc:
+            logger.exception("Failed to fetch POTD for text answer: %s", exc)
+            await message.reply_text(FETCH_ERROR)
+            return
+
+        await asyncio.to_thread(reset_hint_state_for_new_slug, user.id, potd["slug"])
+
         if looks_like_code or asks_for_approach_review:
             reply = await asyncio.to_thread(review_user_approach, potd["content"], text, potd["title"])
-        elif asks_for_concept_help:
-            reply = await asyncio.to_thread(answer_user_question, potd["content"], text, potd["title"])
-        else:
+        elif asks_for_next_hint:
             next_level = min(MAX_HINTS, (await asyncio.to_thread(get_hint_level, user.id)) + 1)
             reply = await asyncio.to_thread(hint_text, potd["content"], potd["title"], next_level)
             await asyncio.to_thread(set_hint_level, user.id, next_level, potd["slug"])
+        else:
+            reply = await asyncio.to_thread(answer_user_question, potd["content"], text, potd["title"])
 
         await message.reply_text(reply)
     except Exception as exc:
         logger.exception("Failed to answer user text: %s", exc)
         await message.reply_text("I hit an error while generating the reply.")
+    finally:
+        _set_user_busy(context, False)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
