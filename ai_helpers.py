@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from dotenv import load_dotenv
 from google import genai
@@ -28,9 +29,54 @@ Hard rules:
 - Keep responses concise, practical, and educational.
 - For the LeetCode POTD, provide progressive hints numbered 1 to 10.
 - Each hint should reveal a little more, but still not finish the problem.
+
+Telegram response style:
+- Write in plain, readable text for a mobile chat.
+- Do not use Markdown headings like ###, bold markers like **text**, bullet stars, or horizontal separators.
+- Do not use LaTeX or math delimiters like $S$, \(a, b\), or \text{limit}.
+- Prefer simple forms like S, (a, b), nums[i], and limit.
+- Use short paragraphs and simple numbered lists only when they genuinely help.
+- Avoid decorative formatting. Keep symbols only when they are needed for code, variables, ranges, or formulas.
 """
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+def _clean_for_telegram(text: str) -> str:
+    text = text.strip()
+
+    # Remove LaTeX wrappers
+    text = re.sub(r"\\\((.*?)\\\)", r"\1", text, flags=re.S)
+    text = re.sub(r"\\\[(.*?)\\\]", r"\1", text, flags=re.S)
+    text = re.sub(r"\$(.*?)\$", r"\1", text, flags=re.S)
+
+    # Basic LaTeX cleanup
+    replacements = {
+        r"\\text\{([^{}]*)\}": r"\1",
+        r"\\leq": "<=",
+        r"\\geq": ">=",
+        r"\\times": "×",
+        r"\\neq": "!=",
+        r"\\rightarrow": "->",
+    }
+
+    for pattern, repl in replacements.items():
+        text = re.sub(pattern, repl, text)
+
+    # Remove markdown headings/separators
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)
+    text = re.sub(r"^\s*[-*_]{3,}\s*$", "", text, flags=re.M)
+
+    # Remove bold/italic markers
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.S)
+    text = re.sub(r"(?<!\*)\*(?!\*)([^*\n]+)\*(?!\*)", r"\1", text)
+
+    # Normalize bullets
+    text = re.sub(r"^\s*[*]\s+", "- ", text, flags=re.M)
+
+    # Collapse excessive newlines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
 
 
 def _ai_text(input_text: str, instructions: str) -> str:
@@ -47,7 +93,8 @@ def _ai_text(input_text: str, instructions: str) -> str:
         logger.exception("Gemini request failed: %s", exc)
         return "I could not generate AI guidance right now. Please try again shortly."
 
-    return (getattr(response, "text", None) or getattr(response, "output_text", "") or "").strip()
+    raw_text = getattr(response, "text", None) or getattr(response, "output_text", "") or ""
+    return _clean_for_telegram(raw_text)
 
 
 def explain_problem_text(problem_text: str, title: str, difficulty: str, topics: list[str]) -> str:
@@ -79,6 +126,7 @@ Rules:
 - Be progressive. Hint {hint_level} may be slightly more revealing than hint {hint_level - 1}.
 - If hint_level is 10, you may get close to the solution, but still do not provide the final answer.
 - Keep it short and clear.
+- Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
 """,
     )
 
@@ -95,6 +143,7 @@ Rules:
 - Point out what is correct, what is weak, what edge cases are missing, and what to think about next.
 - If code is pasted, explain bugs or inefficiencies.
 - Offer a better direction, but stop before final answer.
+- Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
 """,
     )
 
@@ -110,6 +159,7 @@ Rules:
 - Do not give code.
 - Explain only the part they asked about.
 - Stay within the problem context.
+- Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
 """,
     )
 
@@ -118,12 +168,38 @@ def answer_general_question(user_text: str) -> str:
     return _ai_text(
         input_text=user_text,
         instructions="""
-Answer the user's regular question conversationally.
+You are a strictly limited LeetCode POTD assistant for Telegram.
 
-Rules:
-- You are allowed to answer general, non-LeetCode questions.
-- Keep the answer concise and useful.
-- If they ask for LeetCode help, remind them they can use /potd or /hint.
-- Do not pretend their question is about the current POTD unless they clearly say so.
+You must ONLY respond to:
+1. Questions directly related to the current LeetCode POTD.
+2. Greetings and simple conversational messages like:
+   - hi
+   - hello
+   - hey
+   - bye
+   - thank you
+
+Strict Rules:
+- Do NOT answer general knowledge questions.
+- Do NOT answer coding questions unrelated to the current POTD.
+- Do NOT answer math, science, history, politics, personal advice, or any unrelated topic.
+- Do NOT generate essays, stories, opinions, or creative content.
+- Do NOT roleplay or engage in unrestricted conversation.
+- Do NOT answer questions about other LeetCode problems unless explicitly tied to the current POTD.
+- If the user asks anything unrelated to the POTD, politely refuse.
+
+For unrelated questions, reply EXACTLY:
+"I can only help with the current LeetCode POTD and related discussion."
+
+For greetings:
+- Respond briefly and politely.
+- Keep responses under 1 sentence.
+
+For POTD-related questions:
+- Be concise, clear, and technical.
+- Give hints before full solutions when possible.
+- Do not hallucinate problem details.
+- If context is unclear, ask the user to reference the POTD explicitly.
+- Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
 """,
     )
