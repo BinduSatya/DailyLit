@@ -32,6 +32,7 @@ from message_formatter import build_problem_message, problem_keyboard
 
 FETCH_ERROR = "I could not fetch today's LeetCode problem right now. Please try again shortly."
 BUSY_CALLBACK = "busy"
+MAX_TELEGRAM_MESSAGE_LENGTH = 3900
 
 
 def _user_busy(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -54,6 +55,50 @@ async def _show_button_loading(update: Update, text: str = "Working on it...") -
         )
     except TelegramError as exc:
         logger.debug("Could not update inline keyboard loading state: %s", exc)
+
+
+def _split_telegram_text(text: str, limit: int = MAX_TELEGRAM_MESSAGE_LENGTH) -> list[str]:
+    text = text.strip()
+    if not text:
+        return [""]
+
+    chunks: list[str] = []
+    remaining = text
+
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at < limit // 2:
+            split_at = limit
+
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    return chunks
+
+
+async def _reply_text_safely(
+    message: Any,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    disable_web_page_preview: bool | None = None,
+) -> None:
+    chunks = _split_telegram_text(text)
+    for index, chunk in enumerate(chunks):
+        await message.reply_text(
+            chunk,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup if index == 0 else None,
+            disable_web_page_preview=disable_web_page_preview,
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -117,7 +162,8 @@ async def potd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await asyncio.to_thread(reset_hint_state_for_new_slug, user.id, potd["slug"])
 
     hint_level = await asyncio.to_thread(get_hint_level, user.id)
-    await message.reply_text(
+    await _reply_text_safely(
+        message,
         build_problem_message(potd),
         parse_mode=ParseMode.HTML,
         reply_markup=problem_keyboard(max(1, hint_level + 1)),
@@ -205,7 +251,7 @@ async def send_next_hint(update_or_query: Any, context: ContextTypes.DEFAULT_TYP
     else:
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Review my approach", callback_data="review_approach")]])
 
-    await message.reply_text(text, reply_markup=keyboard)
+    await _reply_text_safely(message, text, reply_markup=keyboard)
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -243,7 +289,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 potd["difficulty"],
                 potd["topics"],
             )
-            await query.message.reply_text(text)
+            await _reply_text_safely(query.message, text)
             return
 
         if query.data == "next_hint":
@@ -251,12 +297,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         if query.data == "review_approach":
-            await query.message.reply_text(
+            await _reply_text_safely(
+                query.message,
                 "Paste your code or approach in the chat, and I will review it without giving the final answer."
             )
             return
 
-        await query.message.reply_text("I did not recognize that action.")
+        await _reply_text_safely(query.message, "I did not recognize that action.")
     except Exception as exc:
         logger.exception("Failed to handle button action: %s", exc)
         await query.message.reply_text(FETCH_ERROR if query.data in {"explain_problem", "next_hint"} else "I hit an error.")
@@ -325,7 +372,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if not (looks_like_code or asks_for_approach_review or asks_for_problem_help):
             reply = await asyncio.to_thread(answer_general_question, text)
-            await message.reply_text(reply)
+            await _reply_text_safely(message, reply)
             return
 
         try:
@@ -346,7 +393,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             reply = await asyncio.to_thread(answer_user_question, potd["content"], text, potd["title"])
 
-        await message.reply_text(reply)
+        await _reply_text_safely(message, reply)
     except Exception as exc:
         logger.exception("Failed to answer user text: %s", exc)
         await message.reply_text("I hit an error while generating the reply.")

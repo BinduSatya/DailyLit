@@ -37,6 +37,7 @@ Telegram response style:
 - Prefer simple forms like S, (a, b), nums[i], and limit.
 - Use short paragraphs and simple numbered lists only when they genuinely help.
 - Avoid decorative formatting. Keep symbols only when they are needed for code, variables, ranges, or formulas.
+- Keep most replies under 2500 characters. If more detail is needed, ask the user if they want a deeper explanation.
 """
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -54,7 +55,7 @@ def _clean_for_telegram(text: str) -> str:
         r"\\text\{([^{}]*)\}": r"\1",
         r"\\leq": "<=",
         r"\\geq": ">=",
-        r"\\times": "×",
+        r"\\times": "x",
         r"\\neq": "!=",
         r"\\rightarrow": "->",
     }
@@ -108,6 +109,7 @@ Topics: {', '.join(topics) if topics else 'N/A'}
 
 Do not solve it. Do not give code. Focus on what the problem is asking, what the inputs mean,
 what must be produced, and what constraints or patterns matter.
+Keep the reply under 2500 characters.
 """,
     )
 
@@ -127,6 +129,7 @@ Rules:
 - If hint_level is 10, you may get close to the solution, but still do not provide the final answer.
 - Keep it short and clear.
 - Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
+- Keep the reply under 1200 characters.
 """,
     )
 
@@ -144,6 +147,7 @@ Rules:
 - If code is pasted, explain bugs or inefficiencies.
 - Offer a better direction, but stop before final answer.
 - Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
+- Keep the reply under 2500 characters.
 """,
     )
 
@@ -160,6 +164,7 @@ Rules:
 - Explain only the part they asked about.
 - Stay within the problem context.
 - Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
+- Keep the reply under 2500 characters.
 """,
     )
 
@@ -201,5 +206,6 @@ For POTD-related questions:
 - Do not hallucinate problem details.
 - If context is unclear, ask the user to reference the POTD explicitly.
 - Use plain Telegram text. No Markdown, no LaTeX, no decorative separators.
+- Try to keep the reply under 2000 characters.
 """,
     )
