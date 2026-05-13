@@ -34,7 +34,7 @@ from telegram_handler import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-TZ_NAME = os.getenv("TZ", "Asia/Kolkata").strip()
+TZ_NAME = os.getenv("APP_TIMEZONE", "Asia/Kolkata").strip()
 TIMEZONE = ZoneInfo(TZ_NAME)
 
 if not BOT_TOKEN:
