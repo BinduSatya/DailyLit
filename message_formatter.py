@@ -5,7 +5,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from ai_helpers import MAX_HINTS
+from ai_text_helpers import MAX_HINTS
 
 
 def build_problem_message(potd: dict[str, Any]) -> str:
@@ -25,7 +25,9 @@ def problem_keyboard(next_hint_level: int) -> InlineKeyboardMarkup:
     next_hint_level = max(1, min(MAX_HINTS, next_hint_level))
     rows = [
         [InlineKeyboardButton("Explain problem", callback_data="explain_problem")],
+        [InlineKeyboardButton("Voice explanation", callback_data="explain_problem_voice")],
         [InlineKeyboardButton(f"Next hint ({next_hint_level})", callback_data="next_hint")],
+        [InlineKeyboardButton(f"Voice hint ({next_hint_level})", callback_data="next_hint_voice")],
         [InlineKeyboardButton("Review my approach", callback_data="review_approach")],
     ]
     return InlineKeyboardMarkup(rows)

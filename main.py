@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from telegram import BotCommand
 from telegram.error import TelegramError
+from telegram.request import HTTPXRequest
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from db import init_db
@@ -44,8 +45,19 @@ if not BOT_TOKEN:
 
 
 def build_app() -> Application:
-    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-
+    request = HTTPXRequest(
+        read_timeout=60,
+        write_timeout=60,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init).build()
+        .request(request)
+        .build()
+    )
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))

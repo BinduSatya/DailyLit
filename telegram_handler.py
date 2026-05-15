@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from typing import Any
 
@@ -9,7 +10,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.error import Forbidden, RetryAfter, TelegramError
 from telegram.ext import ContextTypes
 
-from ai_helpers import (
+from ai_text_helpers import (
     MAX_HINTS,
     answer_general_question,
     answer_user_question,
@@ -17,6 +18,7 @@ from ai_helpers import (
     hint_text,
     review_user_approach,
 )
+from ai_voice_helpers import text_to_voice_file
 from db import (
     get_hint_level,
     get_subscribed_users,
@@ -33,6 +35,7 @@ from message_formatter import build_problem_message, problem_keyboard
 FETCH_ERROR = "I could not fetch today's LeetCode problem right now. Please try again shortly."
 BUSY_CALLBACK = "busy"
 MAX_TELEGRAM_MESSAGE_LENGTH = 3900
+VOICE_ERROR = "I could not generate the voice response right now. Please try again shortly."
 
 
 def _user_busy(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -99,6 +102,65 @@ async def _reply_text_safely(
             reply_markup=reply_markup if index == 0 else None,
             disable_web_page_preview=disable_web_page_preview,
         )
+
+
+async def _reply_voice_safely(message: Any, text: str) -> None:
+    voice_path: str | None = None
+
+    try:
+        bot = message.get_bot() if hasattr(message, "get_bot") else None
+        if bot:
+            await bot.send_chat_action(
+                chat_id=message.chat_id,
+                action=ChatAction.RECORD_VOICE
+            )
+
+        voice_path = await asyncio.to_thread(
+            text_to_voice_file,
+            text
+        )
+
+        with open(voice_path, "rb") as voice:
+            await message.reply_voice(
+                voice=voice,
+                read_timeout=60,
+                write_timeout=60,
+                connect_timeout=30,
+                pool_timeout=30,
+            )
+
+    except Exception as exc:
+        logger.exception(
+            "Voice reply failed: %s",
+            exc
+        )
+
+        await message.reply_text(
+            "Voice generation/upload failed, sending text instead.\n\n"
+            + text[:3500]
+        )
+
+    finally:
+        if voice_path:
+            try:
+                os.remove(voice_path)
+
+            except OSError as exc:
+                logger.debug(
+                    "Could not remove temporary voice file %s: %s",
+                    voice_path,
+                    exc,
+                )
+
+
+def _hint_choice_keyboard(next_hint_level: int) -> InlineKeyboardMarkup:
+    next_hint_level = max(1, min(MAX_HINTS, next_hint_level))
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"Next hint ({next_hint_level})", callback_data="next_hint")],
+            [InlineKeyboardButton(f"Voice hint ({next_hint_level})", callback_data="next_hint_voice")],
+        ]
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,6 +316,28 @@ async def send_next_hint(update_or_query: Any, context: ContextTypes.DEFAULT_TYP
     await _reply_text_safely(message, text, reply_markup=keyboard)
 
 
+async def send_next_hint_voice(update_or_query: Any, context: ContextTypes.DEFAULT_TYPE, potd: dict[str, Any]) -> None:
+    user = getattr(update_or_query, "effective_user", None) or getattr(update_or_query, "from_user", None)
+    message = getattr(update_or_query, "effective_message", None) or getattr(update_or_query, "message", None)
+    if not user or not message:
+        return
+
+    await asyncio.to_thread(reset_hint_state_for_new_slug, user.id, potd["slug"])
+    current = await asyncio.to_thread(get_hint_level, user.id)
+    next_level = min(MAX_HINTS, current + 1)
+
+    text = await asyncio.to_thread(hint_text, potd["content"], potd["title"], next_level)
+    await asyncio.to_thread(set_hint_level, user.id, next_level, potd["slug"])
+    await _reply_voice_safely(message, text, f"{potd['title']} hint {next_level}")
+
+    if next_level < MAX_HINTS:
+        keyboard = _hint_choice_keyboard(next_level + 1)
+    else:
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Review my approach", callback_data="review_approach")]])
+
+    await message.reply_text("Want another hint?", reply_markup=keyboard)
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -290,10 +374,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 potd["topics"],
             )
             await _reply_text_safely(query.message, text)
+            hint_level = await asyncio.to_thread(get_hint_level, user.id)
+            await query.message.reply_text("Ready for a hint?", reply_markup=_hint_choice_keyboard(hint_level + 1))
+            return
+
+        if query.data == "explain_problem_voice":
+            text = await asyncio.to_thread(
+                explain_problem_text,
+                potd["content"],
+                potd["title"],
+                potd["difficulty"],
+                potd["topics"],
+            )
+            await _reply_voice_safely(query.message, text, f"{potd['title']} explanation")
+            hint_level = await asyncio.to_thread(get_hint_level, user.id)
+            await query.message.reply_text("Ready for a hint?", reply_markup=_hint_choice_keyboard(hint_level + 1))
             return
 
         if query.data == "next_hint":
             await send_next_hint(query, context, potd)
+            return
+
+        if query.data == "next_hint_voice":
+            await send_next_hint_voice(query, context, potd)
             return
 
         if query.data == "review_approach":
@@ -306,7 +409,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _reply_text_safely(query.message, "I did not recognize that action.")
     except Exception as exc:
         logger.exception("Failed to handle button action: %s", exc)
-        await query.message.reply_text(FETCH_ERROR if query.data in {"explain_problem", "next_hint"} else "I hit an error.")
+        if query.data in {"explain_problem_voice", "next_hint_voice"}:
+            await query.message.reply_text(VOICE_ERROR)
+        else:
+            await query.message.reply_text(
+                FETCH_ERROR if query.data in {"explain_problem", "next_hint"} else "I hit an error."
+            )
     finally:
         _set_user_busy(context, False)
 
@@ -332,6 +440,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await asyncio.to_thread(upsert_user, user.id, user.username, user.first_name)
 
         text_lower = text.lower()
+
         looks_like_code = (
             "```" in text
             or "class " in text
@@ -358,6 +467,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 "test case",
                 "edge case",
                 "complexity",
+                "complexities",
                 "constraint",
                 "input",
                 "output",
@@ -367,7 +477,7 @@ async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         asks_for_next_hint = any(
             phrase in text_lower
-            for phrase in ["hint", "next hint", "give me clue", "clue", "stuck"]
+            for phrase in ["hint", "next hint", "give me clue", "clue", "stuck", "how", "clues"]
         )
 
         if not (looks_like_code or asks_for_approach_review or asks_for_problem_help):
